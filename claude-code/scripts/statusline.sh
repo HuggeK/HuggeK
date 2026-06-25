@@ -24,6 +24,9 @@ OUTPUT_TOKENS="$(echo "$INPUT" | jq -r '.context_window.total_output_tokens // 0
 COST_USD="$(echo "$INPUT" | jq -r '.cost.total_cost_usd // 0')"
 USED_PCT="$(echo "$INPUT" | jq -r '.context_window.used_percentage // 0')"
 CURRENT_DIR="$(echo "$INPUT" | jq -r '.workspace.current_dir // ""')"
+# Directory the session was initialized in (project root). Unlike current_dir,
+# this stays put when the cwd moves (e.g. into a worktree). Fall back to cwd.
+INIT_DIR="$(echo "$INPUT" | jq -r '.workspace.project_dir // .cwd // ""')"
 TRANSCRIPT="$(echo "$INPUT" | jq -r '.transcript_path // ""')"
 
 # Project name = last path segment
@@ -187,6 +190,17 @@ if [ -n "$TRANSCRIPT" ]; then
   fi
 fi
 
+# Name of the directory the session was initialized in (leaf folder only).
+# Just the basename keeps the line readable when the cwd moves into a deep
+# worktree path. Handles both / and \ path separators.
+INIT_SEGMENT=""
+if [ -n "$INIT_DIR" ]; then
+  INIT_NAME="${INIT_DIR//\\//}"   # normalize Windows backslashes to forward slashes
+  INIT_NAME="${INIT_NAME%/}"       # drop any trailing slash
+  INIT_NAME="${INIT_NAME##*/}"     # keep the last path component
+  [ -n "$INIT_NAME" ] && INIT_SEGMENT=" | 📁 ${INIT_NAME}"
+fi
+
 # Git branch (if in a git repo)
 BRANCH_SUFFIX=""
 if [ -n "$CURRENT_DIR" ] && command -v git &>/dev/null; then
@@ -194,4 +208,4 @@ if [ -n "$CURRENT_DIR" ] && command -v git &>/dev/null; then
   [ -n "$BRANCH" ] && [ "$BRANCH" != "HEAD" ] && BRANCH_SUFFIX=" ⌥ ${BRANCH}"
 fi
 
-echo "${PROJECT}${BRANCH_SUFFIX} | ${DOT} ${DISPLAY_NAME} ${PROGRESS_BAR} ${PCT_DISPLAY}${EFFORT_SEGMENT} | \$${COST_DISPLAY} · ${CO2_DISPLAY}${USAGE_SEGMENT}${WEEK_SEGMENT}${WF_SEGMENT}"
+echo "${PROJECT}${BRANCH_SUFFIX}${INIT_SEGMENT} | ${DOT} ${DISPLAY_NAME} ${PROGRESS_BAR} ${PCT_DISPLAY}${EFFORT_SEGMENT} | \$${COST_DISPLAY} · ${CO2_DISPLAY}${USAGE_SEGMENT}${WEEK_SEGMENT}${WF_SEGMENT}"
