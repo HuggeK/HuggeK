@@ -3,15 +3,41 @@ set -euo pipefail
 
 # statusline.sh — claude-carbon status line, de-OAuth'd fork.
 # Reads Claude Code status JSON from stdin, outputs CO2 + usage status line.
+# Usage: ... | statusline.sh             (full status line)
+#        ... | statusline.sh --segment   (cost + CO2 only, for embedding in
+#        another status line, e.g. a ccstatusline custom command widget)
 #
 # CHANGES vs upstream claude-carbon:
 #   * Removed the Anthropic OAuth fallback (no token read, no api.anthropic.com call).
 #     5h / weekly usage now come ONLY from rate_limits.* in the statusline stdin —
 #     if this Claude Code version doesn't inject them, those segments are omitted.
 #   * Added a weekly (seven_day) usage segment in the same style as the 5h one.
+#   * Added effort-dots, workflow/subagent activity, and init-dir segments.
+#   * State paths derive from SCRIPT_DIR (the fork is not a plugin install), with
+#     CLAUDE_CARBON_DB / CLAUDE_CONFIG_DIR as overrides.
+#   * Upstream's monthly /carbon-card nudge is NOT pulled in: the skill isn't
+#     installed here, and it writes state from the statusline (this fork keeps
+#     the statusline read-only).
+#
+# PULLED IN from upstream (v1.5.x line, 2026-08):
+#   * Cumulative CO2 from carbon.db (session row written by a Stop hook), with the
+#     context-window estimate as fallback. DORMANT until persist-session.sh is
+#     wired as a Stop hook — the fallback is a snapshot of the current context and
+#     understates long agentic sessions.
+#   * --segment mode.
+#   * 🔥 over-pace warning on the 5h segment (on pace to hit 100% before reset).
+#   * "Update available" notice read from update-check.json (network-free here).
+#   * Install-drift check vs the newest marketplace plugin cache (self-skips
+#     when no marketplace install exists).
+
+SEGMENT_MODE=0
+[ "${1:-}" = "--segment" ] && SEGMENT_MODE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FACTORS_FILE="${SCRIPT_DIR}/../data/factors.json"
+CARBON_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+FACTORS_FILE="${CARBON_DIR}/data/factors.json"
+DB_PATH="${CLAUDE_CARBON_DB:-${CARBON_DIR}/carbon.db}"
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$(cd "${CARBON_DIR}/.." && pwd)}"
 
 # Read stdin
 INPUT="$(cat)"
@@ -28,6 +54,7 @@ CURRENT_DIR="$(echo "$INPUT" | jq -r '.workspace.current_dir // ""')"
 # this stays put when the cwd moves (e.g. into a worktree). Fall back to cwd.
 INIT_DIR="$(echo "$INPUT" | jq -r '.workspace.project_dir // .cwd // ""')"
 TRANSCRIPT="$(echo "$INPUT" | jq -r '.transcript_path // ""')"
+SESSION_ID="$(echo "$INPUT" | jq -r '.session_id // ""')"
 
 # Project name = last path segment
 PROJECT="$(basename "$CURRENT_DIR")"
@@ -52,8 +79,24 @@ else
   FACTOR_OUT="0"
 fi
 
-# Calculate CO2 in grams: (input * factor_in + output * factor_out) / 1_000_000
-CO2_G="$(echo "$INPUT_TOKENS $FACTOR_IN $OUTPUT_TOKENS $FACTOR_OUT" | LC_ALL=C awk '{printf "%.0f", ($1 * $2 + $3 * $4) / 1000000}')"
+# CO2 in grams. Preferred source: this session's row in carbon.db, written by the
+# Stop hook (persist-session.sh) at the end of every turn. That figure is
+# CUMULATIVE and carries the full token breakdown (cache reads, subagents), so it
+# sits on the same time base as the cost next to it. It lags by at most one turn.
+#
+# Fallback: the context-window estimate, used until a row exists (first turn, no
+# Stop hook wired, or DB absent). That figure is a SNAPSHOT of the current
+# context, not a session total — it drops back on every compaction and
+# understates a long agentic session by orders of magnitude.
+CO2_G=""
+if [ -n "$SESSION_ID" ] && [ -f "$DB_PATH" ] && command -v sqlite3 >/dev/null 2>&1; then
+  SESSION_ID_SQL="${SESSION_ID//\'/\'\'}"
+  CO2_G="$(sqlite3 -cmd ".timeout 300" "$DB_PATH" "SELECT printf('%.0f', co2_grams) FROM sessions WHERE session_id='${SESSION_ID_SQL}' AND COALESCE(excluded, 0) = 0 AND co2_grams > 0;" 2>/dev/null || true)"
+  case "$CO2_G" in ''|*[!0-9]*) CO2_G="" ;; esac
+fi
+if [ -z "$CO2_G" ]; then
+  CO2_G="$(echo "$INPUT_TOKENS $FACTOR_IN $OUTPUT_TOKENS $FACTOR_OUT" | LC_ALL=C awk '{printf "%.0f", ($1 * $2 + $3 * $4) / 1000000}')"
+fi
 
 # Format CO2 with adaptive unit
 if [ "$CO2_G" -ge 1000 ] 2>/dev/null; then
@@ -64,6 +107,13 @@ fi
 
 # Round cost to 2 decimals
 COST_DISPLAY="$(echo "$COST_USD" | LC_ALL=C awk '{printf "%.2f", $1}')"
+
+# Segment mode stops here: no progress bar, no git call. The host status line
+# owns the rest.
+if [ "$SEGMENT_MODE" = "1" ]; then
+  echo "\$${COST_DISPLAY} · ${CO2_DISPLAY}"
+  exit 0
+fi
 
 # Build progress bar (10 blocks)
 FILLED=$(( USED_PCT * 10 / 100 ))
@@ -128,7 +178,24 @@ if command -v jq &>/dev/null; then
   WEEK_PCT="$(echo "$INPUT"   | jq -r '.rate_limits.seven_day.used_percentage // .rate_limits.weekly.used_percentage // .rate_limits.seven_day.utilization // empty')"
   WEEK_RESET="$(echo "$INPUT" | jq -r '.rate_limits.seven_day.resets_at // .rate_limits.weekly.resets_at // empty')"
 
-  USAGE_SEGMENT="$(build_seg "Use" "$FIVE_PCT" "$FIVE_RESET" "%H:%M")"
+  # 🔥 pace warning: past 15% of the 5h block AND on pace to hit 100% before the
+  # reset. The block start is reconstructed as reset - 5h; the first 15 minutes
+  # are ignored (a fresh block always projects hot).
+  WARN=""
+  if [ -n "$FIVE_PCT" ]; then
+    FIVE_INT="$(echo "$FIVE_PCT" | LC_ALL=C awk '{printf "%.0f", $1}')"
+    END_EPOCH="$(to_epoch "$FIVE_RESET")"
+    if [ -n "$END_EPOCH" ] && [ "$FIVE_INT" -ge 15 ] 2>/dev/null; then
+      NOW_EPOCH="$(date +%s)"
+      ELAPSED_SEC=$(( NOW_EPOCH - (END_EPOCH - 18000) ))
+      if [ "$ELAPSED_SEC" -gt 900 ]; then
+        HOT="$(echo "$FIVE_PCT $ELAPSED_SEC" | LC_ALL=C awk '{print (($1 * 18000 / $2) >= 100) ? "1" : "0"}')"
+        [ "$HOT" = "1" ] && WARN="🔥 "
+      fi
+    fi
+  fi
+
+  USAGE_SEGMENT="$(build_seg "${WARN}Use" "$FIVE_PCT" "$FIVE_RESET" "%H:%M")"
   WEEK_SEGMENT="$(build_seg "Wk"  "$WEEK_PCT"  "$WEEK_RESET" "%a %H:%M")"
 fi
 
@@ -208,4 +275,67 @@ if [ -n "$CURRENT_DIR" ] && command -v git &>/dev/null; then
   [ -n "$BRANCH" ] && [ "$BRANCH" != "HEAD" ] && BRANCH_SUFFIX=" ⌥ ${BRANCH}"
 fi
 
-echo "${PROJECT}${BRANCH_SUFFIX}${INIT_SEGMENT} | ${DOT} ${DISPLAY_NAME} ${PROGRESS_BAR} ${PCT_DISPLAY}${EFFORT_SEGMENT} | \$${COST_DISPLAY} · ${CO2_DISPLAY}${USAGE_SEGMENT}${WEEK_SEGMENT}${WF_SEGMENT}"
+# "Update available" notice — read-only, network-free. The remote check runs in
+# the background (check-update.sh, launched by a SessionStart hook when wired)
+# and writes a cached flag; here we only read it. A 7-day staleness gate means an
+# abandoned flag (background check stopped) self-clears. Dormant on this install
+# until the fork is a git clone with a version to compare.
+UPDATE_SEGMENT=""
+UPD_FILE="${CARBON_DIR}/update-check.json"
+if [ -z "${CLAUDE_CARBON_NO_UPDATE_NOTIFIER:-}" ] && [ -f "$UPD_FILE" ] && command -v jq &>/dev/null; then
+  # One jq call for the three fields: this runs on every turn, so each spawn is felt.
+  UPD_BEHIND=""; UPD_AT=0; UPD_REMOTE=""
+  IFS="$(printf '\t')" read -r UPD_BEHIND UPD_AT UPD_REMOTE <<EOF
+$(jq -r '[(.behind // false), (.checked_at // 0), (.remote // "")] | @tsv' "$UPD_FILE" 2>/dev/null)
+EOF
+  if [ "$UPD_BEHIND" = "true" ] && [ "${UPD_AT:-0}" -gt 0 ] 2>/dev/null && [ "$(( $(date +%s) - UPD_AT ))" -lt 604800 ] 2>/dev/null; then
+    # Naming the target version turns "something changed" into a judgeable call.
+    # This fork updates via scripts/update.sh, not the /carbon-update skill.
+    UPDATE_SEGMENT=" | ⬆ ${UPD_REMOTE:+${UPD_REMOTE} }update.sh"
+  fi
+fi
+
+# Install-sync check — local-only, two cmp calls, no state file. Only matters on
+# machines that ALSO carry a marketplace install of claude-carbon whose hooks
+# write carbon.db: a stale plugin cache would silently persist with outdated
+# factors while this copy runs green. Compares this install's factors/prices
+# against the newest cached plugin copy. Fast path: one cmp per file, no spawn
+# when the bytes match. Only when they differ does a jq pass strip the
+# "_"-prefixed documentation keys, so a docs-only edit never flags while any
+# value difference still does. Self-skips when no marketplace cache exists.
+DRIFT_SEGMENT=""
+# drift_values_differ <a> <b>: 0 when the two JSON files disagree once every
+# "_"-prefixed key (at any depth) is removed; 1 when they agree. Without jq, any
+# byte difference counts.
+drift_values_differ() {
+  command -v jq &>/dev/null || return 0
+  local A B
+  A="$(jq -S 'walk(if type == "object" then with_entries(select(.key | startswith("_") | not)) else . end)' "$1" 2>/dev/null)" || return 0
+  B="$(jq -S 'walk(if type == "object" then with_entries(select(.key | startswith("_") | not)) else . end)' "$2" 2>/dev/null)" || return 0
+  [ "$A" != "$B" ]
+}
+if [ -z "${CLAUDE_CARBON_NO_DRIFT_CHECK:-}" ] && printf '1.0\n1.0.1\n' | sort -V >/dev/null 2>&1; then
+  CACHE_LATEST=""
+  for D in "${CONFIG_DIR}/plugins/cache"/*/claude-carbon/*/; do
+    [ -d "$D" ] || continue
+    if [ -z "$CACHE_LATEST" ] || [ "$(printf '%s\n%s\n' "$CACHE_LATEST" "$D" | sort -V | tail -1)" = "$D" ]; then
+      CACHE_LATEST="$D"
+    fi
+  done
+  if [ -n "$CACHE_LATEST" ]; then
+    OWN_ROOT="$CARBON_DIR"
+    CACHE_ROOT="$(cd "$CACHE_LATEST" 2>/dev/null && pwd || echo "")"
+    if [ -n "$OWN_ROOT" ] && [ -n "$CACHE_ROOT" ] && [ "$OWN_ROOT" != "$CACHE_ROOT" ]; then
+      for F in data/factors.json data/prices.json; do
+        if [ -f "${CACHE_ROOT}/${F}" ] && [ -f "${OWN_ROOT}/${F}" ] \
+           && ! cmp -s "${CACHE_ROOT}/${F}" "${OWN_ROOT}/${F}" \
+           && drift_values_differ "${CACHE_ROOT}/${F}" "${OWN_ROOT}/${F}"; then
+          DRIFT_SEGMENT=" | ≠ install drift"
+          break
+        fi
+      done
+    fi
+  fi
+fi
+
+echo "${PROJECT}${BRANCH_SUFFIX}${INIT_SEGMENT} | ${DOT} ${DISPLAY_NAME} ${PROGRESS_BAR} ${PCT_DISPLAY}${EFFORT_SEGMENT} | \$${COST_DISPLAY} · ${CO2_DISPLAY}${USAGE_SEGMENT}${WEEK_SEGMENT}${WF_SEGMENT}${UPDATE_SEGMENT}${DRIFT_SEGMENT}"
