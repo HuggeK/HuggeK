@@ -10,7 +10,7 @@ Never wonder which week it is again. **Install it for free:**
 ## Golf and OpenStreetMap
 
 - [OpenFlight](https://github.com/open-flight/openflight): open-source golf
-  launch monitor. I'm a collaborator on the project.
+  launch monitor. I'm one of the project's maintainers.
 - **Golf tagging in OSM:** I help improve how golf is mapped in
   OpenStreetMap. I'm one of the authors of the proposal
   [Relation:Sport for golf courses](https://wiki.openstreetmap.org/wiki/Proposal:Relation:Sport_for_golf_courses),
@@ -52,6 +52,15 @@ management system (EMS):
 negative electricity prices affect your solar export. I improved it so it runs
 entirely in the browser, meaning your file never leaves your computer, and
 added more metrics to the results.
+
+[emmaboda-gk-ocpi-dashboard](https://github.com/HuggeK/emmaboda-gk-ocpi-dashboard)
+is a dashboard for my golf club's EV chargers. It reads every charging session
+from the operator over OCPI and the grid meter's hourly values from E.ON, then
+shows how much of each monthly power peak (effektavgift) the chargers caused,
+what they earn and cost, and whether the charging price covers it. It is
+published every hour by GitHub Actions, and has a plain-language guide in
+Swedish for the club's members.
+[See it live](https://huggek.github.io/emmaboda-gk-ocpi-dashboard/)
 [Try it](https://huggek.github.io/negative-price-calc/)
 
 ## Tools
