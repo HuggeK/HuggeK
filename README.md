@@ -10,7 +10,7 @@ Never wonder which week it is again. **Install it for free:**
 ## Golf and OpenStreetMap
 
 - [OpenFlight](https://github.com/open-flight/openflight): open-source golf
-  launch monitor. I'm a collaborator on the project.
+  launch monitor. I'm one of the project's maintainers.
 - **Golf tagging in OSM:** I help improve how golf is mapped in
   OpenStreetMap. I'm one of the authors of the proposal
   [Relation:Sport for golf courses](https://wiki.openstreetmap.org/wiki/Proposal:Relation:Sport_for_golf_courses),
@@ -52,6 +52,15 @@ management system (EMS):
 negative electricity prices affect your solar export. I improved it so it runs
 entirely in the browser, meaning your file never leaves your computer, and
 added more metrics to the results.
+
+[emmaboda-gk-ocpi-dashboard](https://github.com/HuggeK/emmaboda-gk-ocpi-dashboard)
+is a dashboard for my golf club's EV chargers. It reads every charging session
+from the operator over OCPI and the grid meter's hourly values from E.ON, then
+shows how much of each monthly power peak (effektavgift) the chargers caused,
+what they earn and cost, and whether the charging price covers it. It is
+published every hour by GitHub Actions, and has a plain-language guide in
+Swedish for the club's members.
+[See it live](https://huggek.github.io/emmaboda-gk-ocpi-dashboard/)
 [Try it](https://huggek.github.io/negative-price-calc/)
 
 ## Tools
@@ -86,15 +95,18 @@ I sent fixes to [PINGMapper](https://github.com/CameronBodine/PINGMapper)
   QGIS project behind the map, and step-by-step instructions (in Swedish) for
   [making your own vattenområdeskarta](https://github.com/HuggeK/tornfvofse/blob/main/metod_f%C3%B6r_att_skapa_vattenomr%C3%A5den.md)
   from Lantmäteriet's open property data.
-- [beskattningFVOF](https://github.com/HuggeK/beskattningFVOF): a Jupyter
-  notebook about taxation in a medlemsbeskattad rättsamfällighetsförening,
-  such as a FiskeVårdsOmrådesFörening. The association isn't taxed itself: each member declares their
-  andel of the yearly result, but only above Skatteverket's exception of
-  1,500 kr (this year's amount, subject to change). Given every property's andel in a CSV file, the notebook simulates
-  each possible result. It plots how many members must declare and the total
-  they declare, and prints the breakpoints: the result to stay under before
-  more members have to declare. Name, exception and range are set at the top
-  of the notebook.
+- [beskattningFVOF](https://github.com/HuggeK/beskattningFVOF): a tool for
+  fiskevårdsområdesföreningar and other associations whose members are taxed
+  instead of the association (delägarbeskattade samfälligheter). Each property
+  declares its share of the yearly result, but a farm or forest property only
+  from 1,500 kr (Skatteverket's limit, subject to change). From the
+  association's list of shares and a few totals from the annual accounts, the
+  notebook works out what every property must declare and writes a sheet for
+  the mailing to members. Its taxation curve shows at which result members
+  have to start declaring, with the breakpoints to stay under, a planning
+  table, budget scenarios and an estimate of the extra tax. It runs in the
+  browser with JupyterLite, so the figures never leave your computer.
+  [Run it](https://huggek.github.io/beskattningFVOF/lab/index.html?path=beskattning.ipynb)
 
 ## Projects to do
 
